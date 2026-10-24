@@ -35,17 +35,19 @@ The implemented architecture is documented in [`docs/architecture.md`](docs/arch
 ```text
 User
   ↓
-Streamlit UI
+Streamlit UI (app/ui.py)
   ↓
 Application / AI Service (src/services/ai_service.py)
-  ↓
-Document Processing (Docling)
-  ↓
-Hybrid Retrieval (ChromaDB + BM25 RRF)
-  ↓
-Model Client (src/models/model_client.py)
-  ↓
-Ollama (Local LLM Server) - configured model
+  ├── ConversationMemory (src/capabilities/memory.py)
+  ├── RAGPipeline (src/capabilities/rag.py)
+  │     ├── Docling document conversion and semantic chunking
+  │     ├── ChromaDB persistent vector storage
+  │     └── BM25 lexical re-ranking with reciprocal rank fusion
+  └── OllamaModelClient (src/models/model_client.py)
+          ↓
+      Ollama (local inference server)
+          ↓
+      Configured local model (llama3.2:3b)
 ```
 > **Core Architectural Rule:** The user interface NEVER communicate directly with the model client or Ollama. All interactions pass through the service layer (`ai_service.py`).
 

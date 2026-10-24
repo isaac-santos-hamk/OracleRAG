@@ -22,7 +22,7 @@ Application / AI Service (src/services/ai_service.py)
           ↓
       Ollama (local inference server)
           ↓
-      Configured local model (llama3.2:3b by default)
+      Configured local model (llama3.2:3b)
 ```
 
 ### Core Design Rules
