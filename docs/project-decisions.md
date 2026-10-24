@@ -22,7 +22,7 @@ Across multiple evaluation rounds, we tested several open-weight local model fam
   Extremely lightweight and fast with near-zero latency, but its 1B parameter capacity was simply too constrained to reliably parse dense TTRPG jargon and conditional mechanics, leading to frequent reading comprehension errors.
 
 **Why we chose this:**
-- **Tabletop Session Latency:** In a live TTRPG session, a Game Master or player cannot halt game momentum for 60–120 seconds waiting for an answer. `llama3.2:3b` achieved a 100% completion rate with zero timeouts and an average response time of 10.8 seconds across all 27 evaluation cases.
+- **Tabletop Session Latency:** In a live TTRPG session, a Game Master or player cannot halt game momentum for 60–120 seconds waiting for an answer. `llama3.2:3b` achieved a 100% completion rate with zero timeouts and an average response time of 11.2 seconds across all 27 evaluation cases.
 - **Strict Arbiter Role:** In a rules assistant, creative extrapolation is a defect. Setting `temperature = 0.0` combined with explicit anti-premise prompt constraints forces `llama3.2:3b` into an impartial arbiter role.
 - **Hardware Accessibility:** With an active memory inferior to 3 GB of VRAM, the model runs smoothly on standard consumer laptops and older dedicated GPUs, making it possible for players or Game Masters to run it locally without high-end hardware.
 
@@ -35,7 +35,7 @@ We implemented two additional AI application capabilities beyond basic model int
 
 **Why it is needed:**
 - **TTRPG Grounding & Hallucination Elimination:** TTRPG rulebooks span hundreds of pages of complex, interlocking systems. Standard LLMs frequently confuse game editions or bleed mechanics across distinct rule systems. RAG grounds every response in authoritative, cited text segments and triggers strict fallback refusals when rules are not found in the indexed scripture.
-- **Why Hybrid BM25 RRF was added:** Vector-only embeddings (`all-MiniLM-L6-v2`) can cluster technical RPG jargon (such as "Bonus Die", "Penalty Die", or "Sanity Loss") with general dice-rolling passages. Integrating an in-memory `rank-bm25` index with Reciprocal Rank Fusion ensures exact rule terminology receives priority ranking without incurring neural re-ranker latency.
+- **Why Hybrid BM25 RRF was added:** Vector-only embeddings can cluster technical RPG jargon (such as "Bonus Die", "Penalty Die", or "Sanity Loss") with general dice-rolling passages. Integrating an in-memory `rank-bm25` index with Reciprocal Rank Fusion ensures exact rule terminology receives priority ranking without incurring neural re-ranker latency.
 - **Why Conversational Memory is needed:** Players naturally ask follow-up questions at the game table, for example: *"What if the target is one size larger?"* or *"Can I escape on my next turn?"*. A pure single-turn system forces users to retype all rules context. Short-term memory provides reference resolution while intentionally capping history to 3 turns to prevent context window saturation and avoid polluting rule prompts.
 
 **Alternatives considered:**
@@ -92,4 +92,4 @@ However, we decided to extend the application to handle multi-tome consultations
 When multiple rulebooks are selected in the library, the retrieval engine executes **balanced per-tome querying with round-robin allocation** rather than a single global vector search.
 
 **Why:**  
-In testing, querying multiple tomes via a single global ChromaDB `$in` filter resulted in the larger rulebook drowning out the smaller book due to collection density. By retrieving top candidates *per tome* and balancing them with Reciprocal Rank Fusion, the Oracle guarantees fair representation across all consulted game systems.
+In testing, querying multiple tomes resulted in the larger rulebook drowning out the smaller book due to collection density. By retrieving top candidates per tome and balancing across tomes using relevance-weighted round-robin allocation, the Oracle guarantees fair representation across all consulted game systems.
