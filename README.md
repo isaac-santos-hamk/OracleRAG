@@ -28,6 +28,17 @@ The project is a rules arbiter for TTRPG players and Game Masters. The core valu
 2. **Processing & Guardrails:** The application service layer (`src/services/ai_service.py`) validates and formats the request. The native RAG pipeline combines ChromaDB similarity search with BM25 reciprocal-rank-fusion re-ranking to identify relevant context.
 3. **Model Response:** The model client calls the configured model via the local Ollama server and returns the formatted response back through the service layer to the UI.
 
+## Technologies Summary
+
+- **Environment Manager:** Conda
+- **User Interface:** Streamlit
+- **Local Model Serving & Inference:** Ollama running `llama3.2:3b`
+- **Document Ingestion & Semantic Chunking:** Docling
+- **Vector Storage:** ChromaDB
+- **Lexical Search & Re-Ranking:** Rank-BM25
+- **Data Validation & Schemas:** Pydantic
+- **Automated Testing:** Pytest
+
 ## Architecture
 
 The implemented architecture is documented in [`docs/architecture.md`](docs/architecture.md).
@@ -103,10 +114,19 @@ On Windows (Command Prompt / PowerShell):
 copy .env.example .env
 ```
 
-Ensure `.env` contains valid values for `OLLAMA_BASE_URL` and `MODEL_NAME`:
+Ensure `.env` contains valid values for your local environment:
 ```env
+# Ollama Configuration
 OLLAMA_BASE_URL=http://localhost:11434
 MODEL_NAME=llama3.2:3b
+MODEL_TEMPERATURE=0.0
+OLLAMA_TIMEOUT=180.0
+
+# Vector Database & RAG Configuration
+CHROMA_DB_DIR=./data/chroma
+RAG_COLLECTION_NAME=oracle_rules
+SIMILARITY_THRESHOLD=1.2
+RAG_TOP_K=6
 ```
 
 ### 4. Start Ollama
@@ -136,15 +156,35 @@ pytest
 
 ## Evaluation
 
-Describe your evaluation methodology and summarize key results. Starter test cases can be found in [`evaluation/test_cases.json`](evaluation/test_cases.json).
+We evaluated Oracle RAG across 11 iterative development rounds using an automated benchmark suite ([`evaluation/evaluation.py`](evaluation/evaluation.py)) against 27 structured test cases covering three distinct categories:
+- **Successful Cases (9 cases):** Standard rules lookups and combat actions across diverse RPG systems.
+- **Difficult Cases (12 cases):** Multi-turn conversational memory, rule synthesis, anti-premise protection, and multi-tome consultations.
+- **Failure / Guardrail Cases (6 cases):** Prompt injection defense, out-of-scope non-RPG queries, and empty inputs.
 
-Refer to [`evaluation/README.md`](evaluation/README.md) for guidelines on defining success, edge cases, and failure scenarios.
+### Round 11 Key Results
+
+| Metric | Result |
+| :--- | :--- |
+| **Strict Pass Rate** | **15 / 27 (55.6%)** |
+| **Partial Credit Rate** | **10 / 27 (37.0%)** |
+| **Failed Rate** | **2 / 27 (7.4%)** |
+| **Grounded & Safe Response Rate (Pass + Partial)** | **25 / 27 (92.6%)** |
+| **Cross-System Rule Bleed / Hallucinations** | **0 / 27 (0.0%)** |
+| **Timeouts / Stalled Inferences** | **0 / 27 (0.0%)** |
+| **Average Response Latency** | **11.16 seconds** |
+
+For more information, refer to [`evaluation/evaluation_results.md`](evaluation/evaluation_results.md) and [`evaluation/test_cases.json`](evaluation/test_cases.json).
 
 ## Known limitations
 
-- **Memory Restraints:** Conversational memory will be strictly limited to the last few interactions. While this limits the ability to recall events from early in the session, it is intentional to avoid polluting the prompt context and degrading model performance.
-- **Fallback Mechanism:** The model will not attempt to guess or extrapolate rules. If the similarity search returns a low confidence score, or if the model cannot find the answer in the retrieved text, the system will output a direct refusal message rather than guessing.
+- **Memory Restraints & Question-Only Window:** Conversational memory maintains a sliding window of the last 3 user turns for reference resolution. To strictly prevent self-poisoning and hallucination feedback loops, prior assistant responses are excluded from the prompt context, meaning the Oracle cannot refer back to its own previous conversational verdicts.
+- **Strict Fallback Refusal:** The model will never guess or extrapolate mechanics outside the provided text. If retrieval confidence falls below the similarity threshold, or if an action assumes mechanics from an unindexed companion rulebook, the system outputs an explicit refusal decree rather than improvising.
+- **Multi-Clause Rule Synthesis:** While the compact `llama3.2:3b` model ensures fast tabletop latency, it can occasionally hedge or omit secondary constraints when required to synthesize 3 or more disjoint, multi-condition rules clauses in a single query.
+- **OCR of Scanned Complex Tables:** Scanned rulebook PDFs with unbordered tables, decorative sidebars, or mathematical fractions may occasionally suffer from OCR parsing artifacts during Docling conversion.
+- **Document Ingestion Processing Time:** Thorough document layout analysis and OCR extraction with Docling require significant CPU/GPU compute. Ingesting dense 300+ page rulebooks takes noticeable time before vector persistence is completed.
 
 ## Future improvements
 
-- List planned feature enhancements, architectural refactorings, or future capabilities.
+- **Metadata Breadcrumbs & Hierarchical Chunking:** Enrich chunk metadata during Docling ingestion with full hierarchical path headers (`System > Edition > Chapter > Section`) and merge short sibling subsections to preserve context across multi-condition rules.
+- **OCR Artifact & Table Normalization:** Add automated preprocessing and regex sanitization during ingestion to correct fragmented tabular fractions and unbordered tables in scanned rulebooks.
+- **Sub-Query Decomposition for Complex Queries:** Automatically split multi-condition user inquiries into atomic rule lookups before passing them to the hybrid retrieval pipeline.
