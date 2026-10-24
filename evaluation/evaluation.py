@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.capabilities.memory import ConversationMemory
 from src.config import config
 from src.services.ai_service import AIService
 
@@ -63,13 +64,14 @@ def evaluate_rpg_systems(input_path: Path = TEST_PATH, output_path: Path = TEST_
 
         t0 = time.perf_counter()
         try:
-            # Handle conversational follow-ups if context is provided
+            # Handle conversational follow-ups via ConversationMemory when context is provided
             context = case.get("conversation_context")
-            message_to_send = query
+            history = None
             if context and isinstance(context, list) and len(context) > 0:
-                # Prepend conversation context to clarify references for single-turn prompt execution
-                context_str = " | ".join(context)
-                message_to_send = f"[Context: {context_str}] {query}"
+                memory = ConversationMemory()
+                for prior_turn in context:
+                    memory.add_turn(user_message=str(prior_turn), assistant_response="")
+                history = memory.get_history()
 
             # Normalize tome names against indexed tomes if .pdf extension was omitted
             if tomes is not None and len(tomes) > 0:
@@ -85,8 +87,9 @@ def evaluate_rpg_systems(input_path: Path = TEST_PATH, output_path: Path = TEST_
                 tomes = normalized
 
             response = service.process_message(
-                user_message=message_to_send,
+                user_message=query,
                 selected_tomes=tomes,
+                history=history,
             )
             elapsed = round(time.perf_counter() - t0, 2)
 
