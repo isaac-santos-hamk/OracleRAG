@@ -34,7 +34,8 @@ _STOPWORDS = {
     "she", "should", "so", "some", "such", "t", "than", "that", "the", "their", "theirs", "them", "themselves",
     "then", "there", "these", "they", "this", "those", "through", "to", "too", "under", "until", "up", "very",
     "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom", "why", "will", "with", "you",
-    "your", "yours", "yourself", "yourselves"
+    "your", "yours", "yourself", "yourselves",
+    "work", "works", "working", "happen", "happens", "still", "also",
 }
 
 
@@ -83,7 +84,7 @@ class RAGPipeline:
         self._collection = None
         self._converter = None
         self._chunker = None
-        self._bm25_cache: dict[str, tuple[Any, list[str]]] = {}
+        self._bm25_cache: dict[str, tuple[Any, ...]] = {}
 
     def _get_collection(self):
         """Lazy-initialize Chroma persistent storage and embedding function."""
@@ -104,10 +105,10 @@ class RAGPipeline:
 
     def _get_or_build_bm25(
         self, tome: str | None = None
-    ) -> tuple[Any, list[str]] | None:
+    ) -> tuple[Any, ...] | None:
         """
-        Retrieves or constructs a BM25Okapi index for the specified tome (or all indexed tomes).
-        Returns a tuple of (BM25Okapi instance, list of document ids) or None if unavailable.
+        Retrieves or constructs a BM25Okapi index and corpus metadata for the specified
+        tome (or all indexed tomes).
         """
         if not _HAS_BM25:
             return None
@@ -121,7 +122,7 @@ class RAGPipeline:
             if collection.count() == 0:
                 return None
 
-            kwargs: dict[str, Any] = {"include": ["documents"]}
+            kwargs: dict[str, Any] = {"include": ["documents", "metadatas"]}
             if tome is not None:
                 kwargs["where"] = {"source": tome}
 
@@ -129,17 +130,47 @@ class RAGPipeline:
             if not isinstance(data, dict) or not data.get("documents"):
                 return None
 
-            docs = data.get("documents", [])
-            ids = data.get("ids", [])
-            if not isinstance(docs, list) or not isinstance(ids, list) or len(docs) == 0:
+            raw_docs = data.get("documents", [])
+            raw_ids = data.get("ids", [])
+            if not isinstance(raw_docs, list) or not isinstance(raw_ids, list) or len(raw_docs) == 0:
                 return None
 
-            corpus = [self._tokenize(doc) for doc in docs if isinstance(doc, str)]
+            raw_metas = data.get("metadatas")
+            if not isinstance(raw_metas, list) or len(raw_metas) != len(raw_docs):
+                raw_metas = [{} for _ in raw_docs]
+
+            docs: list[str] = []
+            ids: list[str] = []
+            metas: list[dict[str, Any]] = []
+            corpus: list[list[str]] = []
+            doc_token_sets: list[set[str]] = []
+            sec_token_sets: list[set[str]] = []
+
+            for idx, doc in enumerate(raw_docs):
+                if not isinstance(doc, str):
+                    continue
+                tokens = self._tokenize(doc)
+                meta = raw_metas[idx] if isinstance(raw_metas[idx], dict) else {}
+                doc_id = raw_ids[idx] if idx < len(raw_ids) else f"doc_{idx}"
+                docs.append(doc)
+                ids.append(doc_id)
+                metas.append(meta)
+                corpus.append(tokens)
+                doc_token_sets.append(set(tokens))
+                sec_token_sets.append(set(self._tokenize(str(meta.get("section", "")))))
+
             if not corpus or not any(len(c) > 0 for c in corpus):
                 return None
 
             bm25 = BM25Okapi(corpus)
-            self._bm25_cache[cache_key] = (bm25, ids)
+            self._bm25_cache[cache_key] = (
+                bm25,
+                ids,
+                docs,
+                metas,
+                doc_token_sets,
+                sec_token_sets,
+            )
             return self._bm25_cache[cache_key]
         except Exception:
             return None
@@ -148,56 +179,132 @@ class RAGPipeline:
         self,
         query: str,
         candidates: list[tuple[RuleCitation, float, str]],
+        top_k: int | None = None,
+        threshold: float | None = None,
         tome: str | None = None,
     ) -> list[tuple[RuleCitation, float]]:
         """
-        Re-ranks vector candidates using Reciprocal Rank Fusion (RRF) with BM25.
-        Candidates must have already passed the similarity threshold gatekeeper.
-        RRF formula: RRF_score = 1/(60 + rank_vector) + 1/(60 + rank_bm25)
+        Re-ranks vector candidates using calibrated Reciprocal Rank Fusion (RRF) with BM25,
+        and supplements sparse vector recall via lexical rescue when semantic candidates
+        already passed the similarity threshold gatekeeper.
         """
         if not candidates:
             return []
 
+        limit = top_k if top_k is not None else len(candidates)
+        fallback_dist = threshold if threshold is not None else config.similarity_threshold
+
         if not _HAS_BM25:
-            return [(c, d) for c, d, _ in candidates]
+            return [(c, d) for c, d, _ in candidates[:limit]]
 
         bm25_info = self._get_or_build_bm25(tome)
         q_tokens = self._tokenize(query)
 
         if not bm25_info or not q_tokens:
-            return [(c, d) for c, d, _ in candidates]
+            return [(c, d) for c, d, _ in candidates[:limit]]
 
-        bm25, all_ids = bm25_info
+        bm25 = bm25_info[0]
+        all_ids = bm25_info[1]
+        docs = bm25_info[2] if len(bm25_info) > 2 else []
+        metas = bm25_info[3] if len(bm25_info) > 3 else []
+        doc_token_sets = bm25_info[4] if len(bm25_info) > 4 else []
+        sec_token_sets = bm25_info[5] if len(bm25_info) > 5 else []
+
         if bm25 is None or not hasattr(bm25, "get_scores"):
-            return [(c, d) for c, d, _ in candidates]
+            return [(c, d) for c, d, _ in candidates[:limit]]
 
         try:
+            q_set = set(q_tokens)
             scores = bm25.get_scores(q_tokens)
-            # Map document IDs with positive BM25 scores to their BM25 ranks
             scored_docs = [
-                (all_ids[idx], scores[idx])
-                for idx in range(len(scores))
+                (all_ids[idx], float(scores[idx]), idx)
+                for idx in range(min(len(scores), len(all_ids)))
                 if scores[idx] > 0
             ]
             scored_docs.sort(key=lambda x: x[1], reverse=True)
-            bm25_ranks = {doc_id: rank for rank, (doc_id, _) in enumerate(scored_docs, 1)}
+            bm25_ranks = {doc_id: rank for rank, (doc_id, _, _) in enumerate(scored_docs, 1)}
 
             fused: list[tuple[RuleCitation, float, float]] = []
+            seen_ids: set[str] = set()
             for v_rank, (citation, dist, doc_id) in enumerate(candidates, 1):
-                v_score = 1.0 / (60.0 + v_rank)
+                if doc_id:
+                    seen_ids.add(doc_id)
+                v_score = 1.0 / (10.0 + v_rank)
                 bm25_score = (
-                    (1.0 / (60.0 + bm25_ranks[doc_id]))
+                    (0.5 / (10.0 + bm25_ranks[doc_id]))
                     if doc_id in bm25_ranks
                     else 0.0
                 )
-                rrf_score = v_score + bm25_score
-                fused.append((citation, dist, rrf_score))
+                fused.append((citation, dist, v_score + bm25_score))
 
             # Sort by hybrid RRF score descending
             fused.sort(key=lambda x: x[2], reverse=True)
-            return [(c, d) for c, d, _ in fused]
+            results: list[tuple[RuleCitation, float]] = [(c, d) for c, d, _ in fused[:limit]]
+
+            # Lexical rescue when semantic recall returned fewer than top_k chunks
+            if (
+                top_k is not None
+                and len(results) < top_k
+                and docs
+                and len(docs) == len(all_ids)
+            ):
+                needed = top_k - len(results)
+                rescued: list[tuple[RuleCitation, float]] = []
+                seen_headings = {r[0].section.strip().lower() for r in results}
+
+                # Pass A: Canonical rule sections whose heading directly matches query terms
+                for doc_id, _, idx in scored_docs:
+                    if doc_id in seen_ids or len(rescued) >= needed:
+                        continue
+                    sec_set = sec_token_sets[idx] if idx < len(sec_token_sets) else set()
+                    meta = metas[idx] if idx < len(metas) and isinstance(metas[idx], dict) else {}
+                    sec_name = str(meta.get("section", "General")).strip().lower()
+                    if (
+                        sec_set
+                        and len(sec_set) <= 3
+                        and sec_set.issubset(q_set)
+                        and sec_name not in seen_headings
+                    ):
+                        rescued.append(
+                            (
+                                RuleCitation(
+                                    source=meta.get("source", tome or "Unknown Tome"),
+                                    section=meta.get("section", "General"),
+                                    page=meta.get("page"),
+                                    text=docs[idx],
+                                ),
+                                float(fallback_dist),
+                            )
+                        )
+                        seen_ids.add(doc_id)
+                        seen_headings.add(sec_name)
+
+                # Pass B: Multi-term BM25 matches sharing >= 2 distinct query tokens
+                if len(rescued) < needed and len(q_set) >= 2:
+                    for doc_id, _, idx in scored_docs[: max(top_k * 4, 24)]:
+                        if doc_id in seen_ids or len(rescued) >= needed:
+                            continue
+                        doc_set = doc_token_sets[idx] if idx < len(doc_token_sets) else set()
+                        if len(q_set & doc_set) >= 2:
+                            meta = metas[idx] if idx < len(metas) and isinstance(metas[idx], dict) else {}
+                            rescued.append(
+                                (
+                                    RuleCitation(
+                                        source=meta.get("source", tome or "Unknown Tome"),
+                                        section=meta.get("section", "General"),
+                                        page=meta.get("page"),
+                                        text=docs[idx],
+                                    ),
+                                    float(fallback_dist),
+                                )
+                            )
+                            seen_ids.add(doc_id)
+
+                results.extend(rescued)
+
+            return results[:limit]
         except Exception:
-            return [(c, d) for c, d, _ in candidates]
+            return [(c, d) for c, d, _ in candidates[:limit]]
 
     @property
     def converter(self):
@@ -407,7 +514,8 @@ class RAGPipeline:
         threshold-qualified vector candidates.
         """
         collection = self._get_collection()
-        if collection.count() == 0:
+        total_chunks = collection.count()
+        if total_chunks == 0:
             return []
 
         # If caller explicitly provided an empty list, no tomes are selected
@@ -418,6 +526,7 @@ class RAGPipeline:
             max_distance if max_distance is not None else config.similarity_threshold
         )
         top_k = n_results if n_results is not None else config.rag_top_k
+        pool_k = min(max(top_k * 3, 18), total_chunks)
 
         # Case 1 & 2: No specific tome filter or single tome filter
         if selected_tomes is None or len(selected_tomes) <= 1:
@@ -429,7 +538,7 @@ class RAGPipeline:
 
             query_res = collection.query(
                 query_texts=[query],
-                n_results=min(top_k, collection.count()),
+                n_results=pool_k,
                 where=where_filter,
             )
 
@@ -467,7 +576,13 @@ class RAGPipeline:
                             )
                         )
 
-            reranked = self._rerank_candidates(query, raw_candidates, tome=tome_name)
+            reranked = self._rerank_candidates(
+                query,
+                raw_candidates,
+                top_k=top_k,
+                threshold=threshold,
+                tome=tome_name,
+            )
             return [citation for citation, _ in reranked[:top_k]]
 
         # Case 3: Multiple tomes selected -> Relevance-Weighted Balanced Retrieval
@@ -477,10 +592,10 @@ class RAGPipeline:
         for tome in unique_tomes:
             tome_res = collection.query(
                 query_texts=[query],
-                n_results=min(top_k, collection.count()),
+                n_results=pool_k,
                 where={"source": tome},
             )
-            raw_candidates: list[tuple[RuleCitation, float, str]] = []
+            raw_candidates = []
             if tome_res and tome_res.get("documents") and tome_res["documents"][0]:
                 docs = tome_res["documents"][0]
                 metas = (
@@ -510,7 +625,11 @@ class RAGPipeline:
                         raw_candidates.append((citation, float(dist), doc_id))
 
             tome_candidates[tome] = self._rerank_candidates(
-                query, raw_candidates, tome=tome
+                query,
+                raw_candidates,
+                top_k=top_k,
+                threshold=threshold,
+                tome=tome,
             )
 
         # Filter only tomes that have qualifying excerpts

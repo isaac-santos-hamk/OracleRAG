@@ -203,13 +203,14 @@ def test_rag_pipeline_retrieve_relevant_rules_filtering():
         "distances": [[0.5]],
     }
     pipeline._collection = mock_collection
+    expected_pool_k = min(max(config.rag_top_k * 3, 18), 10)
 
     # 1. No filter (selected_tomes=None)
     res_none = pipeline.retrieve_relevant_rules("What is heavy armor?", selected_tomes=None)
     assert len(res_none) == 1
     mock_collection.query.assert_called_with(
         query_texts=["What is heavy armor?"],
-        n_results=config.rag_top_k,
+        n_results=expected_pool_k,
         where=None,
     )
 
@@ -227,7 +228,7 @@ def test_rag_pipeline_retrieve_relevant_rules_filtering():
     assert len(res_single) == 1
     mock_collection.query.assert_called_with(
         query_texts=["What is heavy armor?"],
-        n_results=config.rag_top_k,
+        n_results=expected_pool_k,
         where={"source": "Armor_Guide.pdf"},
     )
 
@@ -505,10 +506,6 @@ def test_ocr_progress_wrapper_page_by_page():
     assert progress_log[0][0] < progress_log[1][0] < progress_log[2][0]
 
 
-
-
-
-
 def test_delete_rulebook_rag_pipeline():
     """Verify that RAGPipeline.delete_rulebook deletes chunks matching the source from ChromaDB."""
     from src.capabilities.rag import RAGPipeline
@@ -542,7 +539,7 @@ def test_delete_rulebook_ai_service():
     assert res_helper is True
     mock_rag.delete_rulebook.assert_called_once_with("custom_rules.pdf")
 
-    
+
 def test_conversation_history_is_included_in_prompt():
     """Verify that recent conversation history is passed into the model prompt."""
     mock_client = MagicMock()
@@ -555,10 +552,10 @@ def test_conversation_history_is_included_in_prompt():
     mock_rag.get_indexed_tomes.return_value = ["PHB.pdf"]
     mock_rag.retrieve_relevant_rules.return_value = [
         RuleCitation(
-        source="PHB.pdf",
-        section="Combat > Grappling",
-        page=195,
-        text="Grappling involves an Athletics check.",
+            source="PHB.pdf",
+            section="Combat > Grappling",
+            page=195,
+            text="Grappling involves an Athletics check.",
         )
     ]
 
@@ -616,7 +613,6 @@ def test_conversation_history_is_included_without_rule_excerpts():
     assert "The target is grappled." not in prompt_sent
 
 
-
 def test_conversation_history_is_used_for_rag_retrieval():
     """Verify prior user questions provide context to RAG retrieval."""
     mock_client = MagicMock()
@@ -646,6 +642,7 @@ def test_conversation_history_is_used_for_rag_retrieval():
     assert "How does grappling work?" in retrieval_query
     assert "What about escaping?" in retrieval_query
 
+
 def test_model_client_system_prompt_handling():
     """Verify that OllamaModelClient properly passes native system messages when system prompt is provided."""
     from unittest.mock import patch
@@ -670,22 +667,29 @@ def test_model_client_system_prompt_handling():
 
 
 def test_rag_pipeline_uses_configured_top_k():
-    """Verify that RAGPipeline defaults to config.rag_top_k when n_results is omitted."""
+    """Verify that RAGPipeline queries an expanded candidate pool and caps output at config.rag_top_k."""
     from src.capabilities.rag import RAGPipeline
     from unittest.mock import patch
 
     with patch.object(RAGPipeline, "_get_collection") as mock_get_coll:
         mock_coll = MagicMock()
-        mock_coll.count.return_value = 10
-        mock_coll.query.return_value = {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+        mock_coll.count.return_value = 30
+        mock_coll.query.return_value = {
+            "documents": [[f"Rule {i}" for i in range(10)]],
+            "metadatas": [[{"source": "Core.pdf", "section": f"Sec {i}", "page": i} for i in range(10)]],
+            "distances": [[0.2 + 0.05 * i for i in range(10)]],
+            "ids": [[f"doc_{i}" for i in range(10)]],
+        }
+        mock_coll.get.return_value = {"documents": [], "ids": []}
         mock_get_coll.return_value = mock_coll
 
         rag = RAGPipeline()
-        rag.retrieve_relevant_rules("test query")
+        results = rag.retrieve_relevant_rules("test query")
 
         mock_coll.query.assert_called_once()
         _, kwargs = mock_coll.query.call_args
-        assert kwargs["n_results"] == config.rag_top_k
+        assert kwargs["n_results"] == max(config.rag_top_k * 3, 18)
+        assert len(results) == config.rag_top_k
 
 
 def test_rag_pipeline_bm25_rrf_reranking():
@@ -731,6 +735,124 @@ def test_rag_pipeline_bm25_rrf_reranking():
         assert results[1].section == "Combat"
 
 
+def test_rag_pipeline_bm25_lexical_rescue_and_gatekeeper():
+    """Verify BM25 lexical rescue supplements sparse semantic recall while respecting the out-of-scope gatekeeper."""
+    from src.capabilities.rag import RAGPipeline
+    from unittest.mock import patch
+
+    pipeline = RAGPipeline()
+    mock_coll = MagicMock()
+    mock_coll.count.return_value = 4
+
+    corpus_docs = [
+        "Opportunity attacks use your reaction when a hostile creature leaves your reach.",
+        "POISONED: A poisoned creature has disadvantage on attack rolls and ability checks.",
+        "GRAPPLED: A grappled creature's speed becomes 0.",
+        "Spellcasters prepare magical spells from their spellbooks each dawn.",
+    ]
+    corpus_metas = [
+        {"source": "Core.pdf", "section": "OPPORTUNITY ATTACKS", "page": 196},
+        {"source": "Core.pdf", "section": "POISONED", "page": 293},
+        {"source": "Core.pdf", "section": "GRAPPLED", "page": 291},
+        {"source": "Core.pdf", "section": "SPELLCASTING", "page": 201},
+    ]
+    corpus_ids = ["doc_oa", "doc_poisoned", "doc_grappled", "doc_spells"]
+
+    mock_coll.get.return_value = {
+        "documents": corpus_docs,
+        "metadatas": corpus_metas,
+        "ids": corpus_ids,
+    }
+
+    # 1. Sparse semantic recall (only doc_oa <= 1.2): lexical rescue brings in POISONED & GRAPPLED
+    mock_coll.query.return_value = {
+        "documents": [[corpus_docs[0], corpus_docs[3]]],
+        "metadatas": [[corpus_metas[0], corpus_metas[3]]],
+        "distances": [[0.95, 1.45]],
+        "ids": [["doc_oa", "doc_spells"]],
+    }
+
+    with patch.object(pipeline, "_get_collection", return_value=mock_coll):
+        results = pipeline.retrieve_relevant_rules(
+            "If I am poisoned and grappled, can I make an opportunity attack?",
+            n_results=4,
+            max_distance=1.2,
+            selected_tomes=["Core.pdf"],
+        )
+        sections = [r.section for r in results]
+        assert "OPPORTUNITY ATTACKS" in sections
+        assert "POISONED" in sections
+        assert "GRAPPLED" in sections
+
+        # 2. Out-of-scope query (all vector distances > 1.2): gatekeeper blocks BM25 noise
+        mock_coll.query.return_value = {
+            "documents": [[corpus_docs[1]]],
+            "metadatas": [[corpus_metas[1]]],
+            "distances": [[1.55]],
+            "ids": [["doc_poisoned"]],
+        }
+        empty_results = pipeline.retrieve_relevant_rules(
+            "How do poisoned starship hyperdrives attack?",
+            n_results=4,
+            max_distance=1.2,
+            selected_tomes=["Core.pdf"],
+        )
+        assert empty_results == []
+
+
+def test_evaluation_uses_conversation_memory(tmp_path):
+    """Verify evaluation.py feeds conversation_context via ConversationMemory history rather than mutating user_message."""
+    import json
+    from unittest.mock import patch
+    from evaluation.evaluation import evaluate_rpg_systems
+    from src.schemas.responses import AIResponse, RuleCitation
+
+    input_file = tmp_path / "cases_in.json"
+    output_file = tmp_path / "cases_out.json"
+    input_file.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "case-mem",
+                    "category": "successful_case",
+                    "target_system": "D&D 5e",
+                    "selected_tomes": ["PHB.pdf"],
+                    "conversation_context": ["How does grappling work?"],
+                    "input": "Can I still do it while prone?",
+                    "expected_citation_keywords": ["prone"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with patch("evaluation.evaluation.AIService") as mock_service_cls:
+        mock_service = MagicMock()
+        mock_service.get_indexed_tomes.return_value = ["PHB.pdf"]
+        mock_service.process_message.return_value = AIResponse(
+            content="While prone, you have disadvantage on attack rolls.",
+            model="test_model",
+            success=True,
+            citations=[
+                RuleCitation(
+                    source="PHB.pdf",
+                    section="PRONE",
+                    page=293,
+                    text="A prone creature has disadvantage on attack rolls.",
+                )
+            ],
+        )
+        mock_service_cls.return_value = mock_service
+
+        evaluate_rpg_systems(input_path=input_file, output_path=output_file)
+
+        mock_service.process_message.assert_called_once_with(
+            user_message="Can I still do it while prone?",
+            selected_tomes=["PHB.pdf"],
+            history=[{"user": "How does grappling work?", "assistant": ""}],
+        )
+
+
 def test_rag_pipeline_bm25_cache_invalidation():
     """Verify that deleting a rulebook clears the BM25 cache."""
     from src.capabilities.rag import RAGPipeline
@@ -743,6 +865,3 @@ def test_rag_pipeline_bm25_cache_invalidation():
     assert len(pipeline._bm25_cache) > 0
     pipeline.delete_rulebook("Core.pdf")
     assert len(pipeline._bm25_cache) == 0
-
-
-
