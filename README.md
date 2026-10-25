@@ -154,9 +154,17 @@ application requires Streamlit's runtime.
 
 ### 6. Run automated tests
 
+The project includes automated unit tests.
+
+#### Unit Tests
+
+Run the automated unit test suite from the project root:
+
 ```bash
-pytest
+python -m pytest
 ```
+
+- **Scope:** 28 unit tests in [`tests/test_ai_service.py`](tests/test_ai_service.py) covering input validation, Pydantic response schemas, Ollama connection drop handling, missing model error translation, strict UI isolation, dynamic book ingestion/deletion, Conversational Memory sliding window, and BM25 Reciprocal Rank Fusion re-ranking.
 
 ## Evaluation
 
