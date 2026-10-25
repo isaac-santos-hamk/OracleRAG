@@ -6,6 +6,10 @@
 - Ronak Kadyan (ronak.kadyan@student.hamk.fi)
 - Shreshtha Kumar (shreshtha.kumar@student.hamk.fi)
 
+## Presentation & relevant files
+
+- Presentation recording and relevant files: [Access here](https://hameenamk-my.sharepoint.com/:f:/g/personal/amk1021954_student_hamk_fi/IgDnevuELJv2TYgVbA2HvWMOAe5t5qgaEARKCjdZzweMC2A?e=N2KINe)
+
 ## Problem
 
 ### Intended users
