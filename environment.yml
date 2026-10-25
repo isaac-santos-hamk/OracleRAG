@@ -12,6 +12,7 @@ dependencies:
       - python-dotenv
       - pytest
       - docling
+      - pypdfium2
       - streamlit
       - chromadb
       - rank-bm25
